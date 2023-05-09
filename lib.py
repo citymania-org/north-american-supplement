@@ -364,7 +364,7 @@ def render_upscale(points, zoom=1, noise=1.5):
 
     im = Image.fromarray(npimg, mode='RGBA')
     # im.putpalette(grf.PALETTE)
-    return im
+    return minx, miny, im
 
 
 def debug_sprites(sprites, scale):
@@ -390,6 +390,7 @@ class House(grf.SpriteGenerator):
         self.path = Path(path)
         self.geometry = Geometry.import_obj(self.path)
         self.points = generate_d3_points(self.geometry)
+        self.origin = d3_to_cam(0, 0, 0)
 
     def debug_sprites(self):
         r = self.get_sprites(None)
@@ -403,12 +404,13 @@ class House(grf.SpriteGenerator):
 
     def get_sprites(self, g):
         res = [grf.ReplaceOldSprites([(self.id, 1)])]
-        x1 = render_upscale(self.points, zoom=1, noise=1.5)
-        x2 = render_upscale(self.points, zoom=2, noise=1.5)
-        x4 = render_upscale(self.points, zoom=4, noise=1.5)
+        ox1, oy1, x1 = render_upscale(self.points, zoom=1, noise=1.5)
+        ox2, oy2, x2 = render_upscale(self.points, zoom=2, noise=1.5)
+        ox4, oy4, x4 = render_upscale(self.points, zoom=4, noise=1.5)
+        ox, oy = 0, -1
         res.append(grf.AlternativeSprites(
-            grf.ImageSprite(x1, zoom=grf.ZOOM_4X, xofs=-25, yofs=-24),
-            grf.ImageSprite(x2, zoom=grf.ZOOM_2X, xofs=-25 * 2, yofs=-24 * 2),
-            grf.ImageSprite(x4, zoom=grf.ZOOM_NORMAL, xofs=-25 * 4, yofs=-24 * 4),
+            grf.ImageSprite(x1, zoom=grf.ZOOM_4X, xofs=ox + ox1, yofs=oy + oy1),
+            grf.ImageSprite(x2, zoom=grf.ZOOM_2X, xofs=ox * 2 + ox2 + 1, yofs=oy * 2 + oy2 + 1),
+            grf.ImageSprite(x4, zoom=grf.ZOOM_NORMAL, xofs=ox * 4 + ox4 + 2, yofs=oy * 4 + oy4 + 2),
         ))
         return res
