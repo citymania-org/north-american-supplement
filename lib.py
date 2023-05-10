@@ -13,6 +13,9 @@ CAM_NORM = (6**.5 / 4., 6**.5 / 4., .5)
 LIGHT_NORM = (-6**.5 / 4., 6**.5 / 4., .5)
 SHADE_STRENGTH = 128
 
+DEBUG_COLOURS = [0xFF000000 | int(x[1:], 16) for x in ('#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231', '#911eb4', '#46f0f0', '#f032e6', '#bcf60c', '#fabebe', '#008080', '#e6beff', '#9a6324', '#fffac8', '#800000', '#aaffc3', '#808000', '#ffd8b1', '#000075', '#808080', '#ffffff', '#000000')]
+
+
 
 def d3_to_cam(x, y, z):
     return (y - x, (y + x) / 2 - z)
@@ -231,13 +234,17 @@ class Geometry:
         return res
 
 
-def generate_d3_points(geometry):
+def generate_d3_points(geometry, texture_scale=1):
     d3_list = []
     texture = Image.open(geometry.texture_path)
+    if texture_scale != 1:
+        texture = texture.resize((texture.size[0] // texture_scale, texture.size[1] // texture_scale), Image.NEAREST)
     texture = texture.convert('RGBA')
     w, h = texture.size
     nptex = np.array(texture)
     nptex = nptex.view(dtype=np.uint32).reshape(nptex.shape[:-1])
+
+    # npimg = np.zeros(nptex.shape, dtype=np.uint32)
     for f in geometry.faces:
         if len(f.vertices) == 0:
             print('Face has no vertices')
@@ -254,6 +261,7 @@ def generate_d3_points(geometry):
         vl = []
         cl = []
         for u, v, xyz in f.iter_pixels_uv(w, h):
+            # npimg[v, u] = nptex[v, u]
             cl.append(nptex[v, u])
             vl.append(xyz)
 
@@ -261,11 +269,13 @@ def generate_d3_points(geometry):
             d3_list.append((f, np.array(vl), cl))
         else:
             d3_list.append((f, np.empty((0, 3)), np.empty((0,))))
-
+    # im = Image.fromarray(npimg, mode='RGBA')
+    # im = im.resize((im.size[0] * 10, im.size[1] * 10), Image.NEAREST)
+    # im.show()
     return d3_list
 
 
-def render_upscale(points, zoom=1, noise=1.5):
+def render_upscale(points, zoom=1, noise=1.5, show_smooth_groups=False):
     sg_vlr = defaultdict(list)
     sg_cl = defaultdict(list)
     z = {}
@@ -321,46 +331,48 @@ def render_upscale(points, zoom=1, noise=1.5):
     # ps.close()
     # return s
 
-    shade_cache = {}
-    # for p, (pcz, vlr, cl, f) in z.items():
-    for p, (xyz, sgkey, f) in z.items():
-        # if sgkey not in sge:
-        #     ps[p[0] - minx, p[1] - miny] = 0xb8
-        #     continue
-        # ps[p[0] - minx, p[1] - miny] = (sgkey + 1) % 256 if sgkey in sge else 0
-        # continue
-        # find nearest point
-        if len(sg_vlr[sgkey]) <= 0:
-            continue
+    if show_smooth_groups:
+        for p, (xyz, sgkey, f) in z.items():
+            npimg[p[1] - miny, p[0] - minx] = DEBUG_COLOURS[hash(sgkey) % len(DEBUG_COLOURS)]
+    else:
+        shade_cache = {}
+        # for p, (pcz, vlr, cl, f) in z.items():
+        for p, (xyz, sgkey, f) in z.items():
 
-        # ci = np.argmin(np.linalg.norm(sg_vlr[sgkey] - xyz, axis=1))
-        ci = np.argmin(np.linalg.norm(sg_vlr[sgkey] - xyz, axis=1) * (np.random.rand(len(sg_vlr[sgkey])) * noise + 1))
-        colour = sg_cl[sgkey][ci]
-        if not colour:
-            continue
-        shade_key = (f, colour)
-        shaded_colour = shade_cache.get(shade_key)
-        if shaded_colour is None:
-            light = max(np.dot(f.normal, LIGHT_NORM), 0)
-            b = (colour >> 16) & 0xFF
-            g = (colour >> 8) & 0xFF
-            r = colour & 0xFF
-            # shade = int(255 - SHADE_STRENGTH * (1 - light))
-            # r = (r * shade) // 255
-            # g = (g * shade) // 255
-            # b = (b * shade) // 255
-            # shaded_colour = (b << 16) | (g << 8) | r
-            # shaded_colour = colour
-            # shade_cache[shade_key] = shaded_colour
+            # find nearest point
+            if len(sg_vlr[sgkey]) <= 0:
+                continue
 
-            colour = spectra.rgb(r / 255., g / 255., b / 255.)
-            colour = colour.darken((1 - light) * SHADE_STRENGTH / 4)
-            r, g, b = colour.clamped_rgb
-            shaded_colour = int(r * 255) | (int(g * 255) << 8) | (int(b * 255) << 16)
-            shade_cache[shade_key] = shaded_colour
+            if noise == 0:
+                ci = np.argmin(np.linalg.norm(sg_vlr[sgkey] - xyz, axis=1))
+            else:
+                ci = np.argmin(np.linalg.norm(sg_vlr[sgkey] - xyz, axis=1) * (np.random.rand(len(sg_vlr[sgkey])) * noise + 1))
+            colour = sg_cl[sgkey][ci]
+            if not colour:
+                continue
+            shade_key = (f, colour)
+            shaded_colour = shade_cache.get(shade_key)
+            if shaded_colour is None:
+                light = max(np.dot(f.normal, LIGHT_NORM), 0)
+                b = (colour >> 16) & 0xFF
+                g = (colour >> 8) & 0xFF
+                r = colour & 0xFF
+                # shade = int(255 - SHADE_STRENGTH * (1 - light))
+                # r = (r * shade) // 255
+                # g = (g * shade) // 255
+                # b = (b * shade) // 255
+                # shaded_colour = (b << 16) | (g << 8) | r
+                # shaded_colour = colour
+                # shade_cache[shade_key] = shaded_colour
 
-        # ps[p[0] - minx, p[1] - miny] = PALETTE[colour]
-        npimg[p[1] - miny, p[0] - minx] = shaded_colour | 0xFF000000
+                colour = spectra.rgb(r / 255., g / 255., b / 255.)
+                colour = colour.darken((1 - light) * SHADE_STRENGTH / 4)
+                r, g, b = colour.clamped_rgb
+                shaded_colour = int(r * 255) | (int(g * 255) << 8) | (int(b * 255) << 16)
+                shade_cache[shade_key] = shaded_colour
+
+            # ps[p[0] - minx, p[1] - miny] = PALETTE[colour]
+            npimg[p[1] - miny, p[0] - minx] = shaded_colour | 0xFF000000
 
     im = Image.fromarray(npimg, mode='RGBA')
     # im.putpalette(grf.PALETTE)
@@ -384,13 +396,59 @@ def debug_sprites(sprites, scale):
     im.show()
 
 
-class House(grf.SpriteGenerator):
-    def __init__(self, id, path):
-        self.id = id
+class ImageGenerator:
+    def __init__(self):
+        pass
+
+
+class FourSideImageGenerator:
+    def __init__(self):
+        pass
+
+
+class ObjFile(FourSideImageGenerator):
+    def __init__(self, path, *, texture_scale=1, noise=1.5):
+        if isinstance(noise, tuple):
+            assert len(noise) == 3, len(noise)
+        else:
+            assert isinstance(noise, (float, int))
+
         self.path = Path(path)
-        self.geometry = Geometry.import_obj(self.path)
-        self.points = generate_d3_points(self.geometry)
+        self.texture_scale = texture_scale
+        self.noise = noise
+        self._loaded = False
         self.origin = d3_to_cam(0, 0, 0)
+
+    def load(self):
+        if self._loaded:
+            return
+        self._loaded = True
+        self.geometry = Geometry.import_obj(self.path)
+        self.points = generate_d3_points(self.geometry, texture_scale=self.texture_scale)
+
+    def get_image(self, xofs=0, yofs=0):
+        #TODO rotation
+
+        self.load()
+        if isinstance(self.noise, tuple):
+            noise_x1, noise_x2, noise_x4 = self.noise
+        else:
+            noise_x1 = noise_x2 = noise_x4 = self.noise
+
+        ox1, oy1, x1 = render_upscale(self.points, zoom=1, noise=noise_x1)
+        ox2, oy2, x2 = render_upscale(self.points, zoom=2, noise=noise_x2)
+        ox4, oy4, x4 = render_upscale(self.points, zoom=4, noise=noise_x4)
+        return grf.AlternativeSprites(
+            grf.ImageSprite(x1, zoom=grf.ZOOM_4X, xofs=xofs + ox1, yofs=yofs + oy1),
+            grf.ImageSprite(x2, zoom=grf.ZOOM_2X, xofs=xofs * 2 + ox2 + 1, yofs=yofs * 2 + oy2 + 1),
+            grf.ImageSprite(x4, zoom=grf.ZOOM_NORMAL, xofs=xofs * 4 + ox4 + 2, yofs=yofs * 4 + oy4 + 2),
+        )
+
+
+class House(grf.SpriteGenerator):
+    def __init__(self, id, model):
+        self.id = id
+        self.model = model
 
     def debug_sprites(self):
         r = self.get_sprites(None)
@@ -404,13 +462,5 @@ class House(grf.SpriteGenerator):
 
     def get_sprites(self, g):
         res = [grf.ReplaceOldSprites([(self.id, 1)])]
-        ox1, oy1, x1 = render_upscale(self.points, zoom=1, noise=1.5)
-        ox2, oy2, x2 = render_upscale(self.points, zoom=2, noise=1.5)
-        ox4, oy4, x4 = render_upscale(self.points, zoom=4, noise=1.5)
-        ox, oy = 0, -1
-        res.append(grf.AlternativeSprites(
-            grf.ImageSprite(x1, zoom=grf.ZOOM_4X, xofs=ox + ox1, yofs=oy + oy1),
-            grf.ImageSprite(x2, zoom=grf.ZOOM_2X, xofs=ox * 2 + ox2 + 1, yofs=oy * 2 + oy2 + 1),
-            grf.ImageSprite(x4, zoom=grf.ZOOM_NORMAL, xofs=ox * 4 + ox4 + 2, yofs=oy * 4 + oy4 + 2),
-        ))
+        res.append(self.model.get_image(0, -1))
         return res

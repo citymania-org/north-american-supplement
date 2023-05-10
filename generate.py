@@ -20,8 +20,8 @@ House = g.bind(lib.House)
 
 House(
     id=1553,
-    # path='models/test1.obj',
-    path='models/1553.obj',
+    # model=lib.ObjFile('models/test1.obj'),
+    model=lib.ObjFile('models/1553.obj', noise=(0, 1, 1.5)),
 ).debug_sprites()
 
 # House(
