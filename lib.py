@@ -1,4 +1,5 @@
 import math
+import os
 from collections import defaultdict
 from pathlib import Path
 
@@ -15,6 +16,8 @@ SHADE_STRENGTH = 128
 
 DEBUG_COLOURS = [0xFF000000 | int(x[1:], 16) for x in ('#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231', '#911eb4', '#46f0f0', '#f032e6', '#bcf60c', '#fabebe', '#008080', '#e6beff', '#9a6324', '#fffac8', '#800000', '#aaffc3', '#808000', '#ffd8b1', '#000075', '#808080', '#ffffff', '#000000')]
 
+DEBUG_DIR = Path('debug')
+os.makedirs(DEBUG_DIR, exist_ok=True)
 
 
 def d3_to_cam(x, y, z):
@@ -503,6 +506,7 @@ def debug_sprites(sprites, scale):
         im.paste(simg, (x, 0))
         x += s.w * sscale + 10
     im = im.resize((im.size[0] * scale, im.size[1] * scale), Image.NEAREST)
+    im.save(DEBUG_DIR / 'debug.png')
     im.show()
 
 
