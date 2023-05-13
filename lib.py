@@ -84,12 +84,15 @@ class Face:
 
 
     def iter_pixels_uv(self, w, h):
+        if len(self.uv) == 0:
+            return
         # uv = self.uv * np.array((w + 2, - 5 * (h + 2))) + np.array((0, 5 * (h + 2)))
         uv = self.uv * np.array((w, h))
         minv = np.min(uv[:, 1], initial=1000) - .5
         maxv = np.max(uv[:, 1], initial=0) - .5
         # print(self.points)
         # print(miny, maxy, math.ceil(miny), math.floor(maxy) + 1)
+        has_pixels = False
         for cvi in range(math.ceil(minv), math.floor(maxv) + 1):
             cv = cvi + .5
             nodes = []
@@ -116,7 +119,11 @@ class Face:
                 maxu = math.floor(uj - .5)
                 for u in range(minu, maxu + 1):
                     xyz = xyzi + (u - ui + .5) * f * (xyzj - xyzi)
+                    has_pixels = True
                     yield (u, cvi, xyz)
+
+        if not has_pixels:
+            yield (min(int(uv[0][0]), w - 1), min(int(uv[0][1]), h - 1), self.vertices[0])
 
     def iter_pixels_cam(self):
         miny = np.min(self.cam[:, 1], initial=1000)
@@ -275,7 +282,7 @@ def generate_d3_points(geometry, texture_scale=1):
     return d3_list
 
 
-def render_upscale(points, zoom=1, noise=1.5, show_smooth_groups=False):
+def render_upscale(points, zoom=1, noise=1.5, show_smooth_groups=False, light_noise=0):
     sg_vlr = defaultdict(list)
     sg_cl = defaultdict(list)
     z = {}
@@ -350,10 +357,14 @@ def render_upscale(points, zoom=1, noise=1.5, show_smooth_groups=False):
             colour = sg_cl[sgkey][ci]
             if not colour:
                 continue
-            shade_key = (f, colour)
+            light = max(np.dot(f.normal, LIGHT_NORM), 0)
+            if light_noise:
+                # light += (np.random.random() - .5) * light_noise
+                light += np.random.standard_normal() * light_noise
+            darken = int((1 - light) * SHADE_STRENGTH / 4)
+            shade_key = (darken, colour)
             shaded_colour = shade_cache.get(shade_key)
             if shaded_colour is None:
-                light = max(np.dot(f.normal, LIGHT_NORM), 0)
                 b = (colour >> 16) & 0xFF
                 g = (colour >> 8) & 0xFF
                 r = colour & 0xFF
@@ -366,7 +377,7 @@ def render_upscale(points, zoom=1, noise=1.5, show_smooth_groups=False):
                 # shade_cache[shade_key] = shaded_colour
 
                 colour = spectra.rgb(r / 255., g / 255., b / 255.)
-                colour = colour.darken((1 - light) * SHADE_STRENGTH / 4)
+                colour = colour.darken(darken)
                 r, g, b = colour.clamped_rgb
                 shaded_colour = int(r * 255) | (int(g * 255) << 8) | (int(b * 255) << 16)
                 shade_cache[shade_key] = shaded_colour
@@ -407,7 +418,7 @@ class FourSideImageGenerator:
 
 
 class ObjFile(FourSideImageGenerator):
-    def __init__(self, path, *, texture_scale=1, noise=1.5):
+    def __init__(self, path, *, texture_scale=1, noise=1.5, light_noise=0):
         if isinstance(noise, tuple):
             assert len(noise) == 3, len(noise)
         else:
@@ -416,6 +427,7 @@ class ObjFile(FourSideImageGenerator):
         self.path = Path(path)
         self.texture_scale = texture_scale
         self.noise = noise
+        self.light_noise = light_noise
         self._loaded = False
         self.origin = d3_to_cam(0, 0, 0)
 
@@ -435,9 +447,9 @@ class ObjFile(FourSideImageGenerator):
         else:
             noise_x1 = noise_x2 = noise_x4 = self.noise
 
-        ox1, oy1, x1 = render_upscale(self.points, zoom=1, noise=noise_x1)
-        ox2, oy2, x2 = render_upscale(self.points, zoom=2, noise=noise_x2)
-        ox4, oy4, x4 = render_upscale(self.points, zoom=4, noise=noise_x4)
+        ox1, oy1, x1 = render_upscale(self.points, zoom=1, noise=noise_x1, light_noise=self.light_noise)
+        ox2, oy2, x2 = render_upscale(self.points, zoom=2, noise=noise_x2, light_noise=self.light_noise)
+        ox4, oy4, x4 = render_upscale(self.points, zoom=4, noise=noise_x4, light_noise=self.light_noise)
         return grf.AlternativeSprites(
             grf.ImageSprite(x1, zoom=grf.ZOOM_4X, xofs=xofs + ox1, yofs=yofs + oy1),
             grf.ImageSprite(x2, zoom=grf.ZOOM_2X, xofs=xofs * 2 + ox2 + 1, yofs=yofs * 2 + oy2 + 1),
