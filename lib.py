@@ -31,6 +31,11 @@ class Face:
         self.group_id = group_id
         self.vertices = vertices
         self.cam = np.array([d3_to_cam(x, y, z) for x, y, z in self.vertices])
+        self.cam_dimensions = (
+            (np.min(self.cam[:, 0], initial=10000), np.min(self.cam[:, 1], initial=10000)),
+            (np.max(self.cam[:, 0], initial=-10000), np.max(self.cam[:, 1], initial=-10000)),
+        )
+
         self.uv = uv
         self.normal = None
 
@@ -126,8 +131,7 @@ class Face:
             yield (min(int(uv[0][0]), w - 1), min(int(uv[0][1]), h - 1), self.vertices[0])
 
     def iter_pixels_cam(self):
-        miny = np.min(self.cam[:, 1], initial=1000)
-        maxy = np.max(self.cam[:, 1], initial=0)
+        miny, maxy = self.cam_dimensions[0][1], self.cam_dimensions[1][1]
         # print(self.points)
         # print(miny, maxy, math.ceil(miny), math.floor(maxy) + 1)
         for cy in range(math.ceil(miny), math.floor(maxy) + 1):
@@ -240,16 +244,44 @@ class Geometry:
         res = cls(v, groups, texpath)
         return res
 
+    def export_obj(self, filename, mtllib, usemtl):
+        if self.groups is None:
+            print('WARNING No smooth groups!')
+            self.groups = {id(f): [f] for f in self.faces}
+        if not self.vertices:
+            print('WARNING No vertices!')
+            self.vertices = [None]
+            for f in self.faces:
+                f.vertex_ids = []
+                # for v in reversed(f.vertices):
+                for v in f.vertices:
+                    f.vertex_ids.append(len(self.vertices))
+                    self.vertices.append(v)
+        with open(filename, 'w') as f:
+            f.write(f'mtllib {mtllib}\n')
+            f.write(f'usemtl {usemtl}\n')
+            v_id = 1
+            vt_id = 1
+            for x, y, z in self.vertices[1:]:
+                f.write(f'v {2 * x:.6f} {2 * z:.6f} {-2 * y:.6f}\n')
+            for sg_id, sg in self.groups.items():
+                sg_str = r'off' if sg_id is None else sg_id
+                f.write(f's {sg_str}\n')
+                for face in sg:
+                    if len(face.vertices) <= 0:
+                        print('Face has no vertices')
+                        continue
 
-def generate_d3_points(geometry, texture_scale=1):
+                    for u, v in face.uv:
+                        f.write(f'vt {u:.6f} {1 - v:.6f}\n')
+
+                    points_str = ' '.join(f'{face.vertex_ids[i]}/{vt_id + i}' for i in range(len(face.vertices)))
+                    vt_id += len(face.vertices)
+                    f.write(f'f {points_str}\n')
+
+
+def generate_d3_points(geometry, np_texture):
     d3_list = []
-    texture = Image.open(geometry.texture_path)
-    if texture_scale != 1:
-        texture = texture.resize((texture.size[0] // texture_scale, texture.size[1] // texture_scale), Image.NEAREST)
-    texture = texture.convert('RGBA')
-    w, h = texture.size
-    nptex = np.array(texture)
-    nptex = nptex.view(dtype=np.uint32).reshape(nptex.shape[:-1])
 
     # npimg = np.zeros(nptex.shape, dtype=np.uint32)
     for f in geometry.faces:
@@ -267,9 +299,10 @@ def generate_d3_points(geometry, texture_scale=1):
 
         vl = []
         cl = []
+        h, w = np_texture.shape
         for u, v, xyz in f.iter_pixels_uv(w, h):
             # npimg[v, u] = nptex[v, u]
-            cl.append(nptex[v, u])
+            cl.append(np_texture[v, u])
             vl.append(xyz)
 
         if vl:
@@ -282,7 +315,7 @@ def generate_d3_points(geometry, texture_scale=1):
     return d3_list
 
 
-def render_upscale(points, zoom=1, noise=1.5, show_smooth_groups=False, light_noise=0):
+def render_z_buffer(points, zoom):
     sg_vlr = defaultdict(list)
     sg_cl = defaultdict(list)
     z = {}
@@ -315,7 +348,6 @@ def render_upscale(points, zoom=1, noise=1.5, show_smooth_groups=False, light_no
 
     minx, maxx = min(p[0] for p in z), max(p[0] for p in z)
     miny, maxy = min(p[1] for p in z), max(p[1] for p in z)
-    npimg = np.zeros((maxy - miny + 1, maxx - minx + 1), dtype=np.uint32)
 
     sge = set()
     for k in sg_vlr:
@@ -330,6 +362,23 @@ def render_upscale(points, zoom=1, noise=1.5, show_smooth_groups=False, light_no
         sg_vlr[k] = np.concatenate(sg_vlr[k])
         sg_cl[k] = np.concatenate(sg_cl[k])
 
+    return (minx, miny, maxx, maxy), z, sg_vlr, sg_cl
+
+
+def render_smooth_groups(points, zoom=1):
+    dim, z, _, _ = render_z_buffer(points, zoom=zoom)
+    minx, miny, maxx, maxy = dim
+    npimg = np.zeros((maxy - miny + 1, maxx - minx + 1), dtype=np.uint32)
+    for p, (xyz, sgkey, f) in z.items():
+        npimg[p[1] - miny, p[0] - minx] = DEBUG_COLOURS[hash(sgkey) % len(DEBUG_COLOURS)]
+    im = Image.fromarray(npimg, mode='RGBA')
+    return minx, miny, im
+
+
+def render_upscale(points, zoom=1, noise=1.5, show_smooth_groups=False, light_noise=0):
+    dim, z, sg_vlr, sg_cl = render_z_buffer(points, zoom=zoom)
+    minx, miny, maxx, maxy = dim
+    npimg = np.zeros((maxy - miny + 1, maxx - minx + 1), dtype=np.uint32)
     # for k in sg_vlr:
     #     print('COLOUR', sg_cl[k])
 
@@ -337,53 +386,103 @@ def render_upscale(points, zoom=1, noise=1.5, show_smooth_groups=False, light_no
     #     ps[p[0] - minx, p[1] - miny] = face_layers[id(f)]
     # ps.close()
     # return s
+    shade_cache = {}
+    for p, (xyz, sgkey, f) in z.items():
 
-    if show_smooth_groups:
-        for p, (xyz, sgkey, f) in z.items():
-            npimg[p[1] - miny, p[0] - minx] = DEBUG_COLOURS[hash(sgkey) % len(DEBUG_COLOURS)]
-    else:
-        shade_cache = {}
-        # for p, (pcz, vlr, cl, f) in z.items():
-        for p, (xyz, sgkey, f) in z.items():
+        # find nearest point
+        if len(sg_vlr[sgkey]) <= 0:
+            continue
 
-            # find nearest point
-            if len(sg_vlr[sgkey]) <= 0:
-                continue
+        noise_factor = (np.random.rand(len(sg_vlr[sgkey])) * noise + 1) if noise > 0 else 1
+        ci = np.argmin(np.linalg.norm(sg_vlr[sgkey] - xyz, axis=1) * noise_factor)
+        colour = sg_cl[sgkey][ci]
+        if not colour:
+            continue
+        light = max(np.dot(f.normal, LIGHT_NORM), 0)
+        if light_noise:
+            # light += (np.random.random() - .5) * light_noise
+            light += np.random.standard_normal() * light_noise
+        darken = int((1 - light) * SHADE_STRENGTH / 4)
+        shade_key = (darken, colour)
+        shaded_colour = shade_cache.get(shade_key)
+        if shaded_colour is None:
+            b = (colour >> 16) & 0xFF
+            g = (colour >> 8) & 0xFF
+            r = colour & 0xFF
+            # shade = int(255 - SHADE_STRENGTH * (1 - light))
+            # r = (r * shade) // 255
+            # g = (g * shade) // 255
+            # b = (b * shade) // 255
+            # shaded_colour = (b << 16) | (g << 8) | r
+            # shaded_colour = colour
+            # shade_cache[shade_key] = shaded_colour
 
-            if noise == 0:
-                ci = np.argmin(np.linalg.norm(sg_vlr[sgkey] - xyz, axis=1))
-            else:
-                ci = np.argmin(np.linalg.norm(sg_vlr[sgkey] - xyz, axis=1) * (np.random.rand(len(sg_vlr[sgkey])) * noise + 1))
-            colour = sg_cl[sgkey][ci]
-            if not colour:
-                continue
-            light = max(np.dot(f.normal, LIGHT_NORM), 0)
-            if light_noise:
-                # light += (np.random.random() - .5) * light_noise
-                light += np.random.standard_normal() * light_noise
-            darken = int((1 - light) * SHADE_STRENGTH / 4)
-            shade_key = (darken, colour)
-            shaded_colour = shade_cache.get(shade_key)
-            if shaded_colour is None:
-                b = (colour >> 16) & 0xFF
-                g = (colour >> 8) & 0xFF
-                r = colour & 0xFF
-                # shade = int(255 - SHADE_STRENGTH * (1 - light))
-                # r = (r * shade) // 255
-                # g = (g * shade) // 255
-                # b = (b * shade) // 255
-                # shaded_colour = (b << 16) | (g << 8) | r
-                # shaded_colour = colour
-                # shade_cache[shade_key] = shaded_colour
+            colour = spectra.rgb(r / 255., g / 255., b / 255.)
+            colour = colour.darken(darken)
+            r, g, b = colour.clamped_rgb
+            shaded_colour = int(r * 255) | (int(g * 255) << 8) | (int(b * 255) << 16)
+            shade_cache[shade_key] = shaded_colour
 
-                colour = spectra.rgb(r / 255., g / 255., b / 255.)
-                colour = colour.darken(darken)
-                r, g, b = colour.clamped_rgb
-                shaded_colour = int(r * 255) | (int(g * 255) << 8) | (int(b * 255) << 16)
-                shade_cache[shade_key] = shaded_colour
+        # ps[p[0] - minx, p[1] - miny] = PALETTE[colour]
+        npimg[p[1] - miny, p[0] - minx] = shaded_colour | 0xFF000000
 
-            # ps[p[0] - minx, p[1] - miny] = PALETTE[colour]
-            npimg[p[1] - miny, p[0] - minx] = shaded_colour | 0xFF000000
+    im = Image.fromarray(npimg, mode='RGBA')
+    # im.putpalette(grf.PALETTE)
+    return minx, miny, im
+
+
+def render_texture_map(points, zoom=1, noise=1.5, light_noise=0):
+    dim, z, sg_vlr, sg_cl = render_z_buffer(points, zoom=zoom)
+    minx, miny, maxx, maxy = dim
+    npimg = np.zeros((maxy - miny + 1, maxx - minx + 1, 3), dtype=np.uint16)
+    # for k in sg_vlr:
+    #     print('COLOUR', sg_cl[k])
+
+    # for p, (pcz, sgkey, f) in z.items():
+    #     ps[p[0] - minx, p[1] - miny] = face_layers[id(f)]
+    # ps.close()
+    # return s
+    shade_cache = {}
+    for p, (xyz, sgkey, f) in z.items():
+
+        # find nearest point
+        if len(sg_vlr[sgkey]) <= 0:
+            continue
+
+        if noise == 0:
+            ci = np.argmin(np.linalg.norm(sg_vlr[sgkey] - xyz, axis=1))
+        else:
+            ci = np.argmin(np.linalg.norm(sg_vlr[sgkey] - xyz, axis=1) * (np.random.rand(len(sg_vlr[sgkey])) * noise + 1))
+        colour = sg_cl[sgkey][ci]
+        if not colour:
+            continue
+        light = max(np.dot(f.normal, LIGHT_NORM), 0)
+        if light_noise:
+            # light += (np.random.random() - .5) * light_noise
+            light += np.random.standard_normal() * light_noise
+        darken = int((1 - light) * SHADE_STRENGTH / 4)
+        shade_key = (darken, colour)
+        shaded_colour = shade_cache.get(shade_key)
+        if shaded_colour is None:
+            b = (colour >> 16) & 0xFF
+            g = (colour >> 8) & 0xFF
+            r = colour & 0xFF
+            # shade = int(255 - SHADE_STRENGTH * (1 - light))
+            # r = (r * shade) // 255
+            # g = (g * shade) // 255
+            # b = (b * shade) // 255
+            # shaded_colour = (b << 16) | (g << 8) | r
+            # shaded_colour = colour
+            # shade_cache[shade_key] = shaded_colour
+
+            colour = spectra.rgb(r / 255., g / 255., b / 255.)
+            colour = colour.darken(darken)
+            r, g, b = colour.clamped_rgb
+            shaded_colour = int(r * 255) | (int(g * 255) << 8) | (int(b * 255) << 16)
+            shade_cache[shade_key] = shaded_colour
+
+        # ps[p[0] - minx, p[1] - miny] = PALETTE[colour]
+        npimg[p[1] - miny, p[0] - minx] = shaded_colour | 0xFF000000
 
     im = Image.fromarray(npimg, mode='RGBA')
     # im.putpalette(grf.PALETTE)
@@ -436,20 +535,46 @@ class ObjFile(FourSideImageGenerator):
             return
         self._loaded = True
         self.geometry = Geometry.import_obj(self.path)
-        self.points = generate_d3_points(self.geometry, texture_scale=self.texture_scale)
+
+        texture_scale = 1
+        texture = Image.open(self.geometry.texture_path)
+        if texture_scale != 1:
+            texture = texture.resize((texture.size[0] // texture_scale, texture.size[1] // texture_scale), Image.NEAREST)
+        texture = texture.convert('RGBA')
+        w, h = texture.size
+        nptex = np.array(texture)
+        nptex = nptex.view(dtype=np.uint32).reshape(nptex.shape[:-1])
+        self.points = generate_d3_points(self.geometry, nptex)
+
+    def _save_mtl(self, filename, mtl, image_path):
+        with open(filename + '.mtl', 'w') as f:
+            f.write(f'newmtl {mtl}\n')
+            f.write(f'map_Kd {image_path}\n')
+
+    def save(self, filename, image_path):
+        usemtl = f'mtl1'
+        self.geometry.export_obj(
+            filename + '.obj',
+            filename + '.mtl',
+            usemtl,
+        )
+        self._save_mtl(filename, usemtl, image_path)
+
+
+    def render(self, zoom):
+        assert zoom in (1, 2, 4)
+        noise = self.noise
+        if isinstance(noise, tuple):
+            noise = noise[{1: 0, 2: 1, 4: 2}[zoom]]
+        return render_upscale(self.points, zoom=zoom, noise=noise, light_noise=self.light_noise)
 
     def get_image(self, xofs=0, yofs=0):
         #TODO rotation
 
         self.load()
-        if isinstance(self.noise, tuple):
-            noise_x1, noise_x2, noise_x4 = self.noise
-        else:
-            noise_x1 = noise_x2 = noise_x4 = self.noise
-
-        ox1, oy1, x1 = render_upscale(self.points, zoom=1, noise=noise_x1, light_noise=self.light_noise)
-        ox2, oy2, x2 = render_upscale(self.points, zoom=2, noise=noise_x2, light_noise=self.light_noise)
-        ox4, oy4, x4 = render_upscale(self.points, zoom=4, noise=noise_x4, light_noise=self.light_noise)
+        ox1, oy1, x1 = self.render(zoom=1)
+        ox2, oy2, x2 = self.render(zoom=2)
+        ox4, oy4, x4 = self.render(zoom=4)
         return grf.AlternativeSprites(
             grf.ImageSprite(x1, zoom=grf.ZOOM_4X, xofs=xofs + ox1, yofs=yofs + oy1),
             grf.ImageSprite(x2, zoom=grf.ZOOM_2X, xofs=xofs * 2 + ox2 + 1, yofs=yofs * 2 + oy2 + 1),
